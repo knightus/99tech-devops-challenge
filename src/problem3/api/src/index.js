@@ -12,7 +12,20 @@ const pool = new Pool({
   port: 5432,
 });
 
+// Postgres can drop idle pooled connections (restart, failover, network blip).
+// pg reports that as an 'error' event on the pool; with no listener Node treats
+// it as an uncaught exception and the whole API process exits.
+pool.on("error", (err) => {
+  console.error("[pg] idle client error:", err.message);
+});
+
 const redis = new Redis({ host: process.env.REDIS_HOST, port: 6379 });
+
+// Same rule for ioredis: an unlistened 'error' event must never be able to
+// take the process down.
+redis.on("error", (err) => {
+  console.error("[redis] error:", err.message);
+});
 
 app.get("/api/users", async (req, res) => {
   try {
