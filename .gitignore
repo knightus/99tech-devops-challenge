@@ -6,3 +6,6 @@ plans/
 
 # Dependencies
 node_modules/
+
+# Local secrets (copy from .env.example)
+.env

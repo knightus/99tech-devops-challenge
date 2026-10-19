@@ -17,8 +17,11 @@ services:
     # signals sent to PID 1, so `docker stop` always waited 10s then SIGKILLed).
     init: true
     environment:
-      - DB_HOST=postgres
-      - REDIS_HOST=redis
+      DB_HOST: postgres
+      DB_USER: ${POSTGRES_USER:?set in .env}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      DB_NAME: ${POSTGRES_DB:?set in .env}
+      REDIS_HOST: redis
     depends_on:
       # Plain depends_on waits for the container to start, not for Postgres to
       # accept connections, so early requests used to fail.
@@ -38,13 +41,16 @@ services:
 
   postgres:
     image: postgres:15
+    # Credentials come from .env (see .env.example), never from source.
     environment:
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: ${POSTGRES_USER:?set in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set in .env}
     volumes:
       - pgdata:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 5s
       timeout: 3s
       retries: 10

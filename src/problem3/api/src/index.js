@@ -6,9 +6,9 @@ const app = express();
 
 const pool = new Pool({
   host: process.env.DB_HOST,
-  user: "postgres",
-  password: "postgres",
-  database: "postgres",
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
   port: 5432,
   // pg's defaults wait forever. Fail fast instead so a stalled database
   // produces a quick 500 rather than requests piling up indefinitely.
