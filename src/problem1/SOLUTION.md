@@ -13,7 +13,6 @@ A Binance-style spot exchange. At 500 req/s the main challenges are correctness 
 ## Contents
 
 - [Architecture Overview](#architecture-overview)
-- [AWS Deployment](#aws-deployment)
 - [Deposit and Withdrawal Flow](#deposit-and-withdrawal-flow)
 - [Deployment Options](#deployment-options)
 - [Options Comparison](#options-comparison)
@@ -44,84 +43,6 @@ flowchart LR
 
 All services run on ECS Fargate with three tasks across three Availability Zones. Each trading pair has a single active matching engine and a warm standby that consumes the same log for failover.
 
-## AWS Deployment
-
-All AWS resources used by Option B. The VPC spans three Availability Zones; only the ALB and NAT gateway are in public subnets.
-
-```mermaid
-flowchart TB
-  Users[Users / API clients] --> R53[Route 53]
-  R53 --> CF[CloudFront<br/>+ AWS WAF + Shield Standard<br/>ACM certificate]
-
-  subgraph Prod["Production account"]
-    subgraph VPC["VPC, 3 AZs"]
-      subgraph Public["Public subnets"]
-        ALB[Application Load Balancer]
-        NAT[NAT gateway]
-      end
-      subgraph App["Private app subnets: ECS Fargate"]
-        API[Order API]
-        WSG[WebSocket gateway]
-        ME[Matching engine]
-        SET[Settlement]
-        MD[Market data]
-        DW[Deposit watcher]
-      end
-      subgraph Data["Private data subnets"]
-        MSK[Amazon MSK<br/>orders, trades topics]
-        RDS[(RDS PostgreSQL<br/>Multi-AZ)]
-        EC[(ElastiCache Redis)]
-      end
-    end
-    S3[(S3: snapshots, archive)]
-    DDB[(DynamoDB: engine lease)]
-    SM[Secrets Manager]
-    ECR[ECR: container images]
-    CW[CloudWatch: logs, metrics, alarms]
-  end
-
-  subgraph Custody["Custody account"]
-    SQS[[SQS FIFO: withdrawals]]
-    SIG[Withdrawal signer<br/>ECS Fargate]
-    KMS[KMS key, secp256k1]
-  end
-
-  CF --> ALB
-  ALB --> API
-  ALB --> WSG
-  API --> RDS
-  API --> MSK
-  MSK --> ME --> MSK
-  MSK --> SET --> RDS
-  MSK --> MD --> EC --> WSG
-  ME --> S3
-  ME --> DDB
-  DW --> RDS
-  API --> SQS --> SIG --> KMS
-  App --> NAT
-  NAT --> NP[Blockchain node provider]
-  SIG --> NP
-```
-
-| AWS service | Used for | Option |
-|---|---|---|
-| Route 53, ACM | DNS and TLS certificates | All |
-| CloudFront, AWS WAF, Shield Standard | Edge TLS, rate limiting, DDoS protection | All |
-| Application Load Balancer | HTTP and WebSocket routing | All |
-| ECS Fargate | All application services | All |
-| Amazon MSK | Order and trade logs | B, C |
-| RDS PostgreSQL Multi-AZ | Balances, orders, trades (and the order log in Option A) | A, B |
-| Aurora PostgreSQL + Global Database | Replaces RDS | C |
-| ElastiCache Redis | Order book snapshots for WebSocket clients | All |
-| DynamoDB | Matching engine leader lease | All |
-| S3 | Engine snapshots, trade archive, backups | All |
-| SQS FIFO (custody account) | Withdrawal queue | All |
-| KMS (custody account) | Withdrawal signing key, secp256k1 | All |
-| Secrets Manager | Database and service credentials | All |
-| ECR | Container images | All |
-| CloudWatch | Logs, metrics, alarms | All |
-| NAT gateway, VPC endpoints | Outbound access, private AWS API access | All |
-
 ## Deposit and Withdrawal Flow
 
 On-chain funds movement is isolated from the trading path. It is not latency-sensitive, but it carries the highest financial risk, so signing runs in a separate AWS account. Security controls are detailed in Problem 5.
@@ -129,7 +50,7 @@ On-chain funds movement is isolated from the trading path. It is not latency-sen
 ```mermaid
 flowchart LR
   CH[Blockchains] --> NP[Node provider]
-  NP --> DW[Deposit watcher] -->|credit after N confirmations| DB[(RDS PostgreSQL)]
+  NP --> DW[Deposit watcher] -->|credit after N confirmations| DB[(PostgreSQL)]
   API[Order API] -->|withdrawal: debit balance| DB
   API --> Q[[SQS FIFO: withdrawal queue]]
   subgraph Custody account
@@ -151,9 +72,69 @@ flowchart LR
 
 All options share the architecture above. They differ in the order log implementation, database failover time, and disaster recovery scope, which trades cost against resilience.
 
+AWS services per option:
+
+| AWS service | Used for | A | B | C |
+|---|---|---|---|---|
+| Route 53, ACM | DNS, TLS certificates | Yes | Yes | Yes |
+| CloudFront, AWS WAF, Shield Standard | Edge TLS, rate limiting, DDoS protection | Yes | Yes | Yes |
+| Application Load Balancer | HTTP and WebSocket routing | Yes | Yes | Yes |
+| ECS Fargate | All application services | Yes | Yes | Yes |
+| RDS PostgreSQL Multi-AZ | Balances, orders, trades | Yes, also the order log | Yes | No |
+| Amazon MSK | Order and trade logs | No | Yes | Yes, replicated cross-region |
+| Aurora PostgreSQL + Global Database | Replaces RDS | No | No | Yes |
+| ElastiCache Redis | Order book snapshots for clients | Primary + replica | Primary + replica | Multi-AZ |
+| DynamoDB | Matching engine leader lease | Yes | Yes | Yes |
+| S3 | Engine snapshots, archive, backups | Yes | Yes | Yes, cross-region replicated |
+| SQS FIFO, KMS (custody account) | Withdrawal queue, signing key | Yes | Yes | Yes |
+| Secrets Manager, ECR, CloudWatch | Credentials, images, observability | Yes | Yes | Yes |
+| NAT gateway | Outbound access | 1 | 1 | 3 |
+| Second region | Disaster recovery | Snapshot copies | Snapshot copies | Pilot light |
+
 ### Option A: Cost-Optimized
 
 The order log is implemented as an append-only PostgreSQL table, avoiding a separate streaming platform. Suitable for launch.
+
+```mermaid
+flowchart TB
+  Users[Users / API clients] --> R53[Route 53] --> CF[CloudFront + WAF + Shield Standard]
+  subgraph Prod["Production account, VPC across 3 AZs"]
+    subgraph Public["Public subnets"]
+      ALB[Application Load Balancer]
+      NAT[NAT gateway x1]
+    end
+    subgraph App["Private subnets: ECS Fargate"]
+      API[Order API]
+      WSG[WebSocket gateway]
+      ME[Matching engine + standby]
+      SET[Settlement]
+      MD[Market data]
+      DW[Deposit watcher]
+    end
+    subgraph Data["Private data subnets"]
+      RDS[(RDS PostgreSQL Multi-AZ<br/>balances + order log table)]
+      EC[(ElastiCache Redis)]
+    end
+    S3[(S3)]
+    DDB[(DynamoDB lease)]
+    OPS[Secrets Manager, ECR, CloudWatch]
+  end
+  subgraph Custody["Custody account"]
+    SQS[[SQS FIFO]] --> SIG[Withdrawal signer] --> KMS[KMS secp256k1]
+  end
+  CF --> ALB --> API
+  ALB --> WSG
+  API --> RDS
+  RDS --> ME --> RDS
+  RDS --> SET
+  ME --> MD --> EC --> WSG
+  ME --> S3
+  ME --> DDB
+  DW --> RDS
+  API --> SQS
+  App --> NAT --> NP[Blockchain node provider]
+  SIG --> NP
+```
 
 | Component | Choice | ~$/mo |
 |---|---|---|
@@ -173,7 +154,19 @@ The order log is implemented as an append-only PostgreSQL table, avoiding a sepa
 
 ### Option B: Balanced
 
-The order log runs on Amazon MSK (Kafka). Engine failover drops to seconds and throughput scales by adding partitions. Target architecture.
+Option A with the order log moved from PostgreSQL to Amazon MSK (Kafka). Engine failover drops to seconds and throughput scales by adding partitions.
+
+Changes from Option A (new components highlighted):
+
+```mermaid
+flowchart LR
+  API[Order API] --> RDS[(RDS PostgreSQL<br/>balances only)]
+  API -->|order| MSK[[Amazon MSK<br/>orders + trades topics]]
+  MSK --> ME[Matching engine] --> MSK
+  MSK --> SET[Settlement] --> RDS
+  MSK --> MD[Market data]
+  style MSK fill:#fde68a,stroke:#b45309
+```
 
 | Component | Choice | ~$/mo |
 |---|---|---|
@@ -194,6 +187,31 @@ The order log runs on Amazon MSK (Kafka). Engine failover drops to seconds and t
 ### Option C: High Availability
 
 Option B with Aurora for faster database failover and a pilot-light disaster recovery region. Suitable for regulated operation.
+
+Changes from Option B (new components highlighted):
+
+```mermaid
+flowchart LR
+  subgraph R1["Primary region"]
+    AUR[(Aurora PostgreSQL<br/>writer + reader)]
+    MSK1[[Amazon MSK]]
+    EC1[(Redis Multi-AZ)]
+    NAT[NAT gateway x3]
+  end
+  subgraph R2["DR region, pilot light"]
+    AUR2[(Aurora Global secondary)]
+    MSK2[[MSK replica]]
+    S32[(S3 replica)]
+  end
+  AUR -->|Global Database| AUR2
+  MSK1 -->|MSK Replicator| MSK2
+  NP2[Second node provider]
+  style AUR fill:#fde68a,stroke:#b45309
+  style EC1 fill:#fde68a,stroke:#b45309
+  style NAT fill:#fde68a,stroke:#b45309
+  style R2 fill:#fef3c7,stroke:#b45309
+  style NP2 fill:#fde68a,stroke:#b45309
+```
 
 | Component | Choice | ~$/mo |
 |---|---|---|
@@ -258,31 +276,31 @@ Applicable to all options.
 
 ## High Availability and Fault Tolerance
 
-Failure scenarios and mitigations (Option B).
+Failure scenarios and mitigations. Where options differ, each is listed.
 
 | Risk | Handling |
 |---|---|
 | Task / AZ failure | 3 tasks across 3 AZs; 2 can carry peak |
-| Engine crash | Standby replays the same log; snapshot + offset = exact recovery |
-| Two engines active | Lease picks the active one; Kafka fencing rejects writes from a stale one |
-| Bad order message | Engine emits `rejected`, never crashes; unprocessable → dead-letter topic + alert |
+| Engine crash | Standby replays the log from the last snapshot position. A: from the table (minutes); B, C: from Kafka (seconds) |
+| Two engines active | DynamoDB lease selects the active engine. A: writes carry a lease version checked by the database; B, C: Kafka transactional fencing rejects a stale engine |
+| Bad order message | Engine emits `rejected` and continues; unprocessable entries go to a dead-letter table (A) or topic (B, C) with an alert |
 | Retries / duplicates | Client order ID; settlement keyed on trade ID |
-| DB failover | API switches to cancel-only for 1-2 min |
-| Traffic spike | Kafka buffers; scale on consumer lag, not CPU |
+| DB failover | A, B: API switches to cancel-only for 1-2 min; C: Aurora fails over in under 30 s |
+| Traffic spike | The order log buffers bursts; services scale on consumer lag, not CPU |
 | Node provider outage | Withdrawals wait in the queue; deposits are credited once it's back (C: second provider) |
 | Withdrawal retried | Idempotent on withdrawal ID; one nonce per withdrawal, so a retry never pays twice |
 
 ## Latency Budget
 
-p99 latency to order acceptance (`202`), Option B.
+p99 latency to order acceptance (`202`), target 100 ms.
 
-| Step | ms |
-|---|---|
-| ALB | 2 |
-| API logic | 3 |
-| Balance reserve (Postgres) | 5-10 |
-| Kafka write, 3 AZs | 5-15 |
-| **Total** | **~30** (target 100) |
+| Step | A (ms) | B, C (ms) |
+|---|---|---|
+| ALB | 2 | 2 |
+| API logic | 3 | 3 |
+| Balance reserve (PostgreSQL) | 5-10 | 5-10 |
+| Order log write | same transaction | 5-15 (Kafka, 3 AZs) |
+| **Total** | **~20** | **~30** |
 
 ## Technology Choices
 
