@@ -27,19 +27,7 @@ A Binance-style spot exchange. At 500 req/s the main challenges are correctness 
 
 The Order API reserves the user's balance in PostgreSQL, then appends the order to a durable, ordered **order log**. The matching engine consumes the log, matches orders, and publishes executed trades to a trades log. Settlement applies those trades to account balances, and the market data service streams the order book to clients over WebSocket.
 
-```mermaid
-flowchart LR
-  U[Users / bots] --> CF[CloudFront + WAF] --> ALB
-  ALB --> API[Order API]
-  ALB --> WS[WebSocket gateway]
-  API -->|set money aside| DB[(PostgreSQL)]
-  API -->|order| IN[[Order log]]
-  IN --> ME[Matching engine<br/>active + standby]
-  ME --> OUT[[Trades log]]
-  OUT --> SET[Settlement] --> DB
-  OUT --> MD[Market data] --> R[(Redis)] --> WS
-  ME -.snapshot.-> S3[(S3)]
-```
+![Logical architecture: order API, order log, matching engine, settlement, market data](images/logical-flow.svg)
 
 All services run on ECS Fargate with three tasks across three Availability Zones. Each trading pair has a single active matching engine and a warm standby that consumes the same log for failover.
 
@@ -47,17 +35,7 @@ All services run on ECS Fargate with three tasks across three Availability Zones
 
 On-chain funds movement is isolated from the trading path. It is not latency-sensitive, but it carries the highest financial risk, so signing runs in a separate AWS account. Security controls are detailed in Problem 5.
 
-```mermaid
-flowchart LR
-  CH[Blockchains] --> NP[Node provider]
-  NP --> DW[Deposit watcher] -->|credit after N confirmations| DB[(PostgreSQL)]
-  API[Order API] -->|withdrawal: debit balance| DB
-  API --> Q[[SQS FIFO: withdrawal queue]]
-  subgraph Custody account
-    Q --> WS[Withdrawal signer] --> KMS[KMS key, secp256k1]
-  end
-  WS -->|broadcast| NP --> CH
-```
+![Deposit and withdrawal flow across the production and custody accounts](images/deposit-withdrawal-flow.svg)
 
 | Part | What it does | Why this way |
 |---|---|---|
@@ -95,46 +73,9 @@ AWS services per option:
 
 The order log is implemented as an append-only PostgreSQL table, avoiding a separate streaming platform. Suitable for launch.
 
-```mermaid
-flowchart TB
-  Users[Users / API clients] --> R53[Route 53] --> CF[CloudFront + WAF + Shield Standard]
-  subgraph Prod["Production account, VPC across 3 AZs"]
-    subgraph Public["Public subnets"]
-      ALB[Application Load Balancer]
-      NAT[NAT gateway x1]
-    end
-    subgraph App["Private subnets: ECS Fargate"]
-      API[Order API]
-      WSG[WebSocket gateway]
-      ME[Matching engine + standby]
-      SET[Settlement]
-      MD[Market data]
-      DW[Deposit watcher]
-    end
-    subgraph Data["Private data subnets"]
-      RDS[(RDS PostgreSQL Multi-AZ<br/>balances + order log table)]
-      EC[(ElastiCache Redis)]
-    end
-    S3[(S3)]
-    DDB[(DynamoDB lease)]
-    OPS[Secrets Manager, ECR, CloudWatch]
-  end
-  subgraph Custody["Custody account"]
-    SQS[[SQS FIFO]] --> SIG[Withdrawal signer] --> KMS[KMS secp256k1]
-  end
-  CF --> ALB --> API
-  ALB --> WSG
-  API --> RDS
-  RDS --> ME --> RDS
-  RDS --> SET
-  ME --> MD --> EC --> WSG
-  ME --> S3
-  ME --> DDB
-  DW --> RDS
-  API --> SQS
-  App --> NAT --> NP[Blockchain node provider]
-  SIG --> NP
-```
+![Option A AWS deployment](images/option-a-aws.svg)
+
+Editable source: [`option-a-aws.drawio`](images/option-a-aws.drawio) (open at app.diagrams.net).
 
 | Component | Choice | ~$/mo |
 |---|---|---|
@@ -153,17 +94,9 @@ Option A is the baseline. Options B and C are compared against it.
 
 Option A with the order log moved from PostgreSQL to Amazon MSK (Kafka). Engine failover drops to seconds and throughput scales by adding partitions.
 
-Changes from Option A (new components highlighted):
+Changes from Option A for both Options B and C (green border: added, amber border: changed):
 
-```mermaid
-flowchart LR
-  API[Order API] --> RDS[(RDS PostgreSQL<br/>balances only)]
-  API -->|order| MSK[[Amazon MSK<br/>orders + trades topics]]
-  MSK --> ME[Matching engine] --> MSK
-  MSK --> SET[Settlement] --> RDS
-  MSK --> MD[Market data]
-  style MSK fill:#fde68a,stroke:#b45309
-```
+![Changes in Options B and C compared with Option A](images/options-b-c-changes.svg)
 
 | Component | Choice | ~$/mo |
 |---|---|---|
@@ -192,30 +125,7 @@ flowchart LR
 
 Option B with Aurora for faster database failover and a pilot-light disaster recovery region. Suitable for regulated operation.
 
-Changes from Option B (new components highlighted):
-
-```mermaid
-flowchart LR
-  subgraph R1["Primary region"]
-    AUR[(Aurora PostgreSQL<br/>writer + reader)]
-    MSK1[[Amazon MSK]]
-    EC1[(Redis Multi-AZ)]
-    NAT[NAT gateway x3]
-  end
-  subgraph R2["DR region, pilot light"]
-    AUR2[(Aurora Global secondary)]
-    MSK2[[MSK replica]]
-    S32[(S3 replica)]
-  end
-  AUR -->|Global Database| AUR2
-  MSK1 -->|MSK Replicator| MSK2
-  NP2[Second node provider]
-  style AUR fill:#fde68a,stroke:#b45309
-  style EC1 fill:#fde68a,stroke:#b45309
-  style NAT fill:#fde68a,stroke:#b45309
-  style R2 fill:#fef3c7,stroke:#b45309
-  style NP2 fill:#fde68a,stroke:#b45309
-```
+The changes for Option C are shown in the diagram under Option B.
 
 | Component | Choice | ~$/mo |
 |---|---|---|
@@ -245,13 +155,7 @@ flowchart LR
 
 Monthly cost and recovery characteristics per option.
 
-```mermaid
-xychart-beta
-  title "Monthly cost, $ (1-yr commitments)"
-  x-axis ["A: Cost-Optimized", "B: Balanced", "C: High Availability"]
-  y-axis "USD" 0 --> 3500
-  bar [1160, 1620, 2960]
-```
+![Monthly cost per option with 1-year commitments](images/cost-comparison.svg)
 
 | | A | B | C |
 |---|---|---|---|

@@ -52,4 +52,5 @@ The same Problem 3 test suite runs on every pull request in [Problem 4 CI](.gith
 | `src/problem3/` | Fixed stack, `verify.sh`, report |
 | `src/problem4/` | Workflows, shared actions, deploy script, IAM policies, sample SPA, report |
 | `src/problem5/` | Security report |
+| `src/diagrams/` | Generator for the draw.io architecture diagrams (`python src/diagrams/build_diagrams.py`) |
 | `.github/workflows/problem4-ci.yml` | Runs Problem 4's AWS-independent jobs, since GitHub ignores workflows under `src/` |
