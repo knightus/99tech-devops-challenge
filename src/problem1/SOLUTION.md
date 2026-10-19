@@ -147,14 +147,7 @@ flowchart TB
 | Wallet | Deposit + withdrawal services, node provider, KMS | 260 |
 | **Total** | on-demand / 1-yr commitments | **1,350 / 1,160** |
 
-| Aspect | Assessment |
-|---|---|
-| Monthly cost | ~$1,160 committed; no Kafka cluster |
-| Order throughput limit | ~5,000 orders/s, bounded by PostgreSQL writes (10x today's peak) |
-| Order acceptance latency | ~20 ms p99; the log write is in the same database transaction |
-| Engine failover | ~10-30 s; the standby polls the table, then takes the lease |
-| Database dependency | Order log and balances share one database; a database failover pauses matching for 1-2 min |
-| Operations | One data store to run, back up and monitor |
+Option A is the baseline. Options B and C are compared against it.
 
 ### Option B: Balanced
 
@@ -183,14 +176,17 @@ flowchart LR
 | Wallet | Deposit + withdrawal services, node provider, KMS | 260 |
 | **Total** | on-demand / 1-yr commitments | **1,810 / 1,620** |
 
-| Aspect | Assessment |
-|---|---|
-| Monthly cost | ~$1,620 committed; +$460 vs A, and MSK has no reserved pricing |
-| Order throughput limit | ~50,000+ orders/s, scaled by adding Kafka partitions |
-| Order acceptance latency | ~30 ms p99; +10 ms for the Kafka write across 3 AZs |
-| Engine failover | ~5-10 s; the standby is already consuming, lease expiry dominates |
-| Database dependency | Matching runs off Kafka; a database failover blocks new orders, but queued orders keep matching |
-| Operations | A Kafka cluster to size and monitor: partitions, disk, broker upgrades |
+**Pros compared with A**
+
+- Matching keeps running during a database failover; in A, matching pauses for 1-2 min.
+- Handles about 10x more orders (~50,000/s vs ~5,000/s).
+- Faster engine failover (~5-10 s vs ~10-30 s).
+
+**Cons compared with A**
+
+- Costs ~$460/month more; MSK has no reserved pricing.
+- Adds ~10 ms to order acceptance (~30 ms vs ~20 ms).
+- One more system to operate: the Kafka cluster.
 
 ### Option C: High Availability
 
@@ -233,15 +229,17 @@ flowchart LR
 | Wallet | Same as B + a second node provider for failover | 460 |
 | **Total** | on-demand / 1-yr commitments | **3,410 / 2,960** |
 
-| Aspect | Assessment |
-|---|---|
-| Monthly cost | ~$2,960 committed; +$1,340 vs B |
-| Order throughput limit | Same as B |
-| Order acceptance latency | Same as B, ~30 ms p99 |
-| Engine failover | Same as B, ~5-10 s |
-| Database dependency | Aurora fails over in under 30 s, so the cancel-only window is under 30 s |
-| Regional outage | Recovery in ~15 min with under 1 min of data loss |
-| Operations | Global Database, MSK Replicator, and regular DR failover drills |
+**Pros compared with A**
+
+- Everything B adds.
+- Database failover in under 30 s instead of 1-2 min.
+- Survives a full region outage: back in ~15 min with under 1 min of data lost, instead of hours.
+
+**Cons compared with A**
+
+- Costs ~$1,800/month more.
+- Adds ~10 ms to order acceptance, as in B.
+- Most to operate: Kafka, Aurora Global Database, cross-region replication, and regular DR drills.
 
 ## Options Comparison
 
