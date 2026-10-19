@@ -1,28 +1,68 @@
-version: "3.9"
-
 services:
   nginx:
     image: nginx:1.25
     ports:
-      - "8080:80"
+      - "${NGINX_PORT:-8080}:80"
     volumes:
       - ./nginx/conf.d:/etc/nginx/conf.d
     depends_on:
-      - api
+      # Only route traffic once the API can actually answer.
+      api:
+        condition: service_healthy
+    restart: unless-stopped
 
   api:
     build: ./api
+    # Run tini as PID 1 so signals reach node (the kernel ignores unhandled
+    # signals sent to PID 1, so `docker stop` always waited 10s then SIGKILLed).
+    init: true
     environment:
-      - DB_HOST=postgres
-      - REDIS_HOST=redis
+      DB_HOST: postgres
+      DB_USER: ${POSTGRES_USER:?set in .env}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      DB_NAME: ${POSTGRES_DB:?set in .env}
+      REDIS_HOST: redis
     depends_on:
-      - postgres
-      - redis
+      # Plain depends_on waits for the container to start, not for Postgres to
+      # accept connections, so early requests used to fail.
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      # Liveness only: /status does not touch Postgres/Redis, so a database
+      # blip never marks a working API as unhealthy.
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/status"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
 
   postgres:
     image: postgres:15
+    # Credentials come from .env (see .env.example), never from source.
     environment:
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: ${POSTGRES_USER:?set in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   redis:
     image: redis:7
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata:
