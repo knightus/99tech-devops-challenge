@@ -1,6 +1,6 @@
 # Problem 2: NGINX Load Balancer at 99% Disk Usage
 
-A VM that only runs NGINX shouldn't fill 64 GB. Something is being written and never cleaned up, most likely logs. Find out what before deleting anything.
+A VM that only runs NGINX should not consume 64 GB. Persistent high usage indicates data that is written continuously and never cleaned up, most commonly logs. The cause must be identified before any data is deleted.
 
 ## Contents
 
@@ -11,22 +11,28 @@ A VM that only runs NGINX shouldn't fill 64 GB. Something is being written and n
 
 ## Troubleshooting
 
-1. `df -h` and `df -i`: have bytes or inodes run out?
-2. `du -xh / --max-depth=2 | sort -h`: where is the space? Usually `/var/log`.
-3. If `df` says full but `du` doesn't add up: `lsof +L1` lists files that were deleted but are still open.
-4. Check `/var/log/nginx`, `journalctl --disk-usage`, and `/etc/logrotate.d/nginx`.
+Read-only checks, in order:
+
+| Step | Command | Purpose |
+|---|---|---|
+| 1 | `df -h`, `df -i` | Determine whether blocks or inodes are exhausted |
+| 2 | `du -xh / --max-depth=2 \| sort -h` | Locate the largest directories, typically `/var/log` |
+| 3 | `lsof +L1` | Find deleted files still held open (when `df` and `du` disagree) |
+| 4 | `ls -lh /var/log/nginx`, `journalctl --disk-usage`, `/etc/logrotate.d/nginx` | Confirm log volume and rotation configuration |
 
 ## Likely Causes
 
-| Cause | Sign | Recover | Prevent |
-|---|---|---|---|
-| Access logs not rotated | Huge `access.log` | `truncate -s 0` the live log; compress or move old ones | Daily rotation with compression; ship logs off the box |
-| Deleted log still open | `df` full, `du` small, `lsof +L1` shows `(deleted)` | `nginx -s reopen` (no restart) | logrotate `postrotate` signals NGINX; never `rm` a live log |
-| Proxy cache / temp files | Big `/var/cache/nginx` | Clear the cache | `max_size` on `proxy_cache_path` |
-| journald | `journalctl --disk-usage` in GB | `journalctl --vacuum-size=500M` | `SystemMaxUse=` |
-| OS leftovers | apt cache, old kernels, core dumps | `apt clean`, `apt autoremove` | Scheduled cleanup |
+Ranked by likelihood for a single-purpose NGINX host.
 
-Reproduced the first two on a 64 MB disk (`reproduce-disk-full.sh`):
+| Cause | Indicator | Recovery | Prevention |
+|---|---|---|---|
+| Access logs not rotated | Large `access.log` | `truncate -s 0` the active log; compress or move rotated logs | Daily rotation with compression; ship logs off the host |
+| Deleted log still open | `df` full, `du` small, `lsof +L1` shows `(deleted)` | `nginx -s reopen` (no restart required) | logrotate `postrotate` signals NGINX; never `rm` an active log |
+| Proxy cache / temp files | Large `/var/cache/nginx` | Clear the cache directory | `max_size` on `proxy_cache_path` |
+| journald | `journalctl --disk-usage` in GB | `journalctl --vacuum-size=500M` | `SystemMaxUse=` |
+| OS artifacts | apt cache, old kernels, core dumps | `apt clean`, `apt autoremove` | Scheduled cleanup |
+
+The first two causes were reproduced on a 64 MB volume (`reproduce-disk-full.sh`):
 
 ```
 traffic:          100% full, access.log = 64M
@@ -36,20 +42,24 @@ lsof +L1       -> nginx ... access.log (deleted)
 nginx -s reopen-> 0%
 ```
 
-`reopen` beats a restart: a load balancer restart drops live connections.
+`nginx -s reopen` is preferred over a restart, because restarting a load balancer drops active connections.
 
 ## Impact
 
-- NGINX keeps serving but silently stops logging. In my test there was no error at all.
-- Uploads too big for NGINX's memory buffer are written to disk first, so they fail.
-- apt and SSH can fail, which makes the fix harder.
-- It's the load balancer, so every service behind it is hit.
+| Area | Effect at 100% |
+|---|---|
+| Logging | NGINX continues serving but silently stops logging; no error is raised (observed in the reproduction) |
+| Request handling | Request bodies larger than the in-memory buffer are written to disk and fail |
+| Operations | apt and SSH logins can fail, slowing recovery |
+| Blast radius | All upstream services behind the load balancer are affected |
 
 ## Prevention
 
-- Alert at 80% disk/inodes, plus "full within 24h". 99% is far too late.
-- Ship logs to S3 + Athena (~$0.023/GB/month), not CloudWatch Logs (~$0.50/GB ingested, which can cost more than the VM).
-- Don't log health-check requests.
-- A bigger disk (~$0.08/GB/month) only delays the next incident.
+| Control | Detail | Cost |
+|---|---|---|
+| Alerting | Disk and inode usage at 80%, plus a 24-hour fill forecast | Negligible |
+| Central logging | S3 + Athena instead of CloudWatch Logs; at several GB/day, CloudWatch ingestion can exceed the VM cost | ~$0.023/GB-month vs ~$0.50/GB ingested |
+| Log volume | Exclude health-check requests from access logs | None |
+| Disk size | Increasing EBS size only delays recurrence | ~$0.08/GB-month (gp3) |
 
-**Assumptions:** stock Ubuntu NGINX with the default logrotate. I can't see the VM, so the causes are ranked guesses; the `du` step finds anything else.
+**Assumptions:** stock Ubuntu NGINX package with its default logrotate configuration. Without access to the VM, the causes are ranked by likelihood; step 2 identifies any cause not listed.
