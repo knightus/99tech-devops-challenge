@@ -41,9 +41,10 @@ redis.on("error", (err) => {
 
 app.get("/api/users", async (req, res) => {
   try {
-    const db = await pool.connect();
-    const result = await db.query("SELECT NOW()");
-    db.release();
+    // pool.query returns the client to the pool even when the query throws.
+    // The old connect/query/release skipped release() on error, leaking one
+    // pool slot per failed query until the pool was exhausted.
+    const result = await pool.query("SELECT NOW()");
 
     await redis.set("last_call", Date.now());
     res.json({ ok: true, time: result.rows[0] });
