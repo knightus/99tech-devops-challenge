@@ -147,10 +147,14 @@ flowchart TB
 | Wallet | Deposit + withdrawal services, node provider, KMS | 260 |
 | **Total** | on-demand / 1-yr commitments | **1,350 / 1,160** |
 
-| Pros | Cons |
+| Aspect | Assessment |
 |---|---|
-| Lowest cost and operational overhead | Database write per order limits growth to about 10x |
-| Deterministic recovery by replaying the table | Engine recovery takes minutes |
+| Monthly cost | ~$1,160 committed; no Kafka cluster |
+| Order throughput limit | ~5,000 orders/s, bounded by PostgreSQL writes (10x today's peak) |
+| Order acceptance latency | ~20 ms p99; the log write is in the same database transaction |
+| Engine failover | ~10-30 s; the standby polls the table, then takes the lease |
+| Database dependency | Order log and balances share one database; a database failover pauses matching for 1-2 min |
+| Operations | One data store to run, back up and monitor |
 
 ### Option B: Balanced
 
@@ -179,10 +183,14 @@ flowchart LR
 | Wallet | Deposit + withdrawal services, node provider, KMS | 260 |
 | **Total** | on-demand / 1-yr commitments | **1,810 / 1,620** |
 
-| Pros | Cons |
+| Aspect | Assessment |
 |---|---|
-| Engine failover in seconds; Kafka adds about 5 ms | MSK is the largest cost item and has no reserved pricing |
-| Scales about 100x by adding partitions | Higher operational overhead than A |
+| Monthly cost | ~$1,620 committed; +$460 vs A, and MSK has no reserved pricing |
+| Order throughput limit | ~50,000+ orders/s, scaled by adding Kafka partitions |
+| Order acceptance latency | ~30 ms p99; +10 ms for the Kafka write across 3 AZs |
+| Engine failover | ~5-10 s; the standby is already consuming, lease expiry dominates |
+| Database dependency | Matching runs off Kafka; a database failover blocks new orders, but queued orders keep matching |
+| Operations | A Kafka cluster to size and monitor: partitions, disk, broker upgrades |
 
 ### Option C: High Availability
 
@@ -225,10 +233,15 @@ flowchart LR
 | Wallet | Same as B + a second node provider for failover | 460 |
 | **Total** | on-demand / 1-yr commitments | **3,410 / 2,960** |
 
-| Pros | Cons |
+| Aspect | Assessment |
 |---|---|
-| AZ failover under 30 s, region failover about 15 min | About 1.8x the cost of B |
-| RPO under 1 min for a regional outage | Global Database and replication add operational overhead |
+| Monthly cost | ~$2,960 committed; +$1,340 vs B |
+| Order throughput limit | Same as B |
+| Order acceptance latency | Same as B, ~30 ms p99 |
+| Engine failover | Same as B, ~5-10 s |
+| Database dependency | Aurora fails over in under 30 s, so the cancel-only window is under 30 s |
+| Regional outage | Recovery in ~15 min with under 1 min of data loss |
+| Operations | Global Database, MSK Replicator, and regular DR failover drills |
 
 ## Options Comparison
 
@@ -247,7 +260,7 @@ xychart-beta
 | Lose 1 AZ | 1-2 min cancel-only | 1-2 min cancel-only | < 30 s |
 | Lose the region | hours | hours | ~15 min |
 | Data lost (region) | minutes | minutes | < 1 min |
-| Engine failover | minutes | seconds | seconds |
+| Engine failover | ~10-30 s | ~5-10 s | ~5-10 s |
 | Grows to | ~10x | ~100x | ~100x |
 
 **Recommendation:** launch on Option A and migrate to Option B before traffic reaches about 10x; the migration only changes the engine's log source. Adopt Option C when the business impact of a regional outage exceeds its additional cost of about $1.5k/month.
@@ -281,7 +294,7 @@ Failure scenarios and mitigations. Where options differ, each is listed.
 | Risk | Handling |
 |---|---|
 | Task / AZ failure | 3 tasks across 3 AZs; 2 can carry peak |
-| Engine crash | Standby replays the log from the last snapshot position. A: from the table (minutes); B, C: from Kafka (seconds) |
+| Engine crash | Standby replays the log from the last snapshot position. A: from the table (~10-30 s); B, C: from Kafka (~5-10 s) |
 | Two engines active | DynamoDB lease selects the active engine. A: writes carry a lease version checked by the database; B, C: Kafka transactional fencing rejects a stale engine |
 | Bad order message | Engine emits `rejected` and continues; unprocessable entries go to a dead-letter table (A) or topic (B, C) with an alert |
 | Retries / duplicates | Client order ID; settlement keyed on trade ID |
