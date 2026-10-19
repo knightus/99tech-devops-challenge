@@ -1,11 +1,11 @@
-# Problem 2: NGINX VM at 99% disk
+# Problem 2: NGINX Load Balancer at 99% Disk Usage
 
 A VM that only runs NGINX shouldn't fill 64 GB. Something is being written and never cleaned up, most likely logs. Find out what before deleting anything.
 
 ## Contents
 
 - [Troubleshooting](#troubleshooting)
-- [Likely causes](#likely-causes)
+- [Likely Causes](#likely-causes)
 - [Impact](#impact)
 - [Prevention](#prevention)
 
@@ -16,7 +16,7 @@ A VM that only runs NGINX shouldn't fill 64 GB. Something is being written and n
 3. If `df` says full but `du` doesn't add up: `lsof +L1` lists files that were deleted but are still open.
 4. Check `/var/log/nginx`, `journalctl --disk-usage`, and `/etc/logrotate.d/nginx`.
 
-## Likely causes
+## Likely Causes
 
 | Cause | Sign | Recover | Prevent |
 |---|---|---|---|

@@ -1,6 +1,6 @@
-# Problem 1: Highly available trading system on AWS
+# Problem 1: Highly Available Trading System on AWS
 
-A Binance-style spot exchange. 500 req/s is small, so the design spends money on correctness (no lost orders, no double-spent balances) and availability, not raw scale.
+A Binance-style spot exchange. At 500 req/s the main challenges are correctness (no lost orders, no double-spent balances) and availability rather than throughput, so the budget prioritizes those.
 
 | | |
 |---|---|
@@ -12,23 +12,20 @@ A Binance-style spot exchange. 500 req/s is small, so the design spends money on
 
 ## Contents
 
-- [How the system works](#how-the-system-works)
-- [Deposits and withdrawals](#deposits-and-withdrawals)
-- [Three ways to build it](#three-ways-to-build-it)
-- [Option A: Lean (launch)](#option-a-lean-launch)
-- [Option B: Balanced (target)](#option-b-balanced-target)
-- [Option C: Resilient (regulated / high stakes)](#option-c-resilient-regulated--high-stakes)
-- [Comparison](#comparison)
-- [Shared cost: data out](#shared-cost-data-out)
-- [Cost levers](#cost-levers)
-- [How it stays up](#how-it-stays-up)
-- [Latency budget (p99, order accepted)](#latency-budget-p99-order-accepted)
-- [Services and alternatives](#services-and-alternatives)
-- [Scaling plan](#scaling-plan)
+- [Architecture Overview](#architecture-overview)
+- [Deposit and Withdrawal Flow](#deposit-and-withdrawal-flow)
+- [Deployment Options](#deployment-options)
+- [Options Comparison](#options-comparison)
+- [Data Transfer Cost](#data-transfer-cost)
+- [Cost Optimization](#cost-optimization)
+- [High Availability and Fault Tolerance](#high-availability-and-fault-tolerance)
+- [Latency Budget](#latency-budget)
+- [Technology Choices](#technology-choices)
+- [Scaling Plan](#scaling-plan)
 
-## How the system works
+## Architecture Overview
 
-When a user places an order, the API first sets aside the money in the database so it can't be spent twice. It then writes the order to an **order log**, a durable, ordered list of every order. A matching engine reads the log, matches buyers with sellers, and writes the resulting trades back out. Settlement updates balances from those trades, and the market data service pushes the live order book to users over WebSocket.
+The Order API reserves the user's balance in PostgreSQL, then appends the order to a durable, ordered **order log**. The matching engine consumes the log, matches orders, and publishes executed trades to a trades log. Settlement applies those trades to account balances, and the market data service streams the order book to clients over WebSocket.
 
 ```mermaid
 flowchart LR
@@ -44,11 +41,11 @@ flowchart LR
   ME -.snapshot.-> S3[(S3)]
 ```
 
-Every service runs on ECS Fargate with 3 copies across 3 AZs. There is one matching engine per trading pair, with a standby that reads the same log so it can take over if the active one fails.
+All services run on ECS Fargate with three tasks across three Availability Zones. Each trading pair has a single active matching engine and a warm standby that consumes the same log for failover.
 
-## Deposits and withdrawals
+## Deposit and Withdrawal Flow
 
-This is how money moves on and off the exchange. It is not latency-sensitive (minutes are fine), but it is where an exchange can lose funds, so it is kept apart from trading. Problem 5 covers how it is secured.
+On-chain funds movement is isolated from the trading path. It is not latency-sensitive, but it carries the highest financial risk, so signing runs in a separate AWS account. Security controls are detailed in Problem 5.
 
 ```mermaid
 flowchart LR
@@ -71,13 +68,13 @@ flowchart LR
 | KMS secp256k1 key | Signing key for the hot wallet | Key stays in AWS's FIPS 140-2 L3 hardware; ~$20/mo vs ~$2,100/mo for 2 CloudHSM units |
 | Hot / cold split | Only a small share of funds is online | A full compromise can only reach the hot wallet |
 
-## Three ways to build it
+## Deployment Options
 
-The services above stay the same. What changes is how the order log is stored, how fast the database fails over, and whether there is a backup region. More resilience costs more, so I priced three versions.
+All options share the architecture above. They differ in the order log implementation, database failover time, and disaster recovery scope, which trades cost against resilience.
 
-## Option A: Lean (launch)
+### Option A: Cost-Optimized
 
-The order log is a table in PostgreSQL. No extra systems to run, so it's the cheapest way to launch.
+The order log is implemented as an append-only PostgreSQL table, avoiding a separate streaming platform. Suitable for launch.
 
 | Component | Choice | ~$/mo |
 |---|---|---|
@@ -92,12 +89,12 @@ The order log is a table in PostgreSQL. No extra systems to run, so it's the che
 
 | Pros | Cons |
 |---|---|
-| Cheapest, fewest moving parts | Every order is a DB write: tops out around 10x traffic |
-| Recovery is exact (replay the table) | Engine recovery takes minutes, not seconds |
+| Lowest cost and operational overhead | Database write per order limits growth to about 10x |
+| Deterministic recovery by replaying the table | Engine recovery takes minutes |
 
-## Option B: Balanced (target)
+### Option B: Balanced
 
-The order log moves to Kafka (Amazon MSK), which is built for this job. The standby engine takes over in seconds, and the system can grow about 100x.
+The order log runs on Amazon MSK (Kafka). Engine failover drops to seconds and throughput scales by adding partitions. Target architecture.
 
 | Component | Choice | ~$/mo |
 |---|---|---|
@@ -112,12 +109,12 @@ The order log moves to Kafka (Amazon MSK), which is built for this job. The stan
 
 | Pros | Cons |
 |---|---|
-| Kafka adds ~5 ms; engine fails over in seconds | MSK is the biggest line and has no reserved pricing |
-| Grows to ~100x by adding partitions | More to operate than A |
+| Engine failover in seconds; Kafka adds about 5 ms | MSK is the largest cost item and has no reserved pricing |
+| Scales about 100x by adding partitions | Higher operational overhead than A |
 
-## Option C: Resilient (regulated / high stakes)
+### Option C: High Availability
 
-Option B plus faster database failover (Aurora) and a standby copy in a second region.
+Option B with Aurora for faster database failover and a pilot-light disaster recovery region. Suitable for regulated operation.
 
 | Component | Choice | ~$/mo |
 |---|---|---|
@@ -133,17 +130,17 @@ Option B plus faster database failover (Aurora) and a standby copy in a second r
 
 | Pros | Cons |
 |---|---|
-| AZ failover < 30 s, region failover ~15 min | ~2x the cost of B |
-| < 1 min of data lost if a region goes down | Global DB and replication add operational work |
+| AZ failover under 30 s, region failover about 15 min | About 1.8x the cost of B |
+| RPO under 1 min for a regional outage | Global Database and replication add operational overhead |
 
-## Comparison
+## Options Comparison
 
-What each option costs, and what it buys you when things fail.
+Monthly cost and recovery characteristics per option.
 
 ```mermaid
 xychart-beta
   title "Monthly cost, $ (1-yr commitments)"
-  x-axis ["A Lean", "B Balanced", "C Resilient"]
+  x-axis ["A: Cost-Optimized", "B: Balanced", "C: High Availability"]
   y-axis "USD" 0 --> 3500
   bar [1160, 1620, 2960]
 ```
@@ -156,33 +153,33 @@ xychart-beta
 | Engine failover | minutes | seconds | seconds |
 | Grows to | ~10x | ~100x | ~100x |
 
-**Recommendation:** launch on A. Move to B before traffic grows about 10x; the change is small, because the engine just reads Kafka instead of a table. Move to C only when a region outage would cost more than about $1.5k/month.
+**Recommendation:** launch on Option A and migrate to Option B before traffic reaches about 10x; the migration only changes the engine's log source. Adopt Option C when the business impact of a regional outage exceeds its additional cost of about $1.5k/month.
 
-## Shared cost: data out
+## Data Transfer Cost
 
-Same for every option, and bigger than all of them.
+Data transfer out applies to every option and is the largest cost driver.
 
 | Market data per client | 10k clients, data/mo | ~$/mo |
 |---|---|---|
 | 2 KB/s, full book updates | 50 TB | 5,000 |
 | Deltas + compressed frames (~70% smaller) | 15 TB | 1,500 |
 
-## Cost levers
+## Cost Optimization
 
-Ways to cut the bill in any option, and what each one costs you.
+Applicable to all options.
 
 | Lever | Saves | Catch |
 |---|---|---|
 | 1-yr Savings Plan + RDS/Redis reservations | ~12-17% | 1-year commitment (MSK has no reserved pricing) |
-| 1 NAT instead of 3 | ~$90/mo | Outbound internet lost if that AZ fails; trading unaffected |
-| S3 gateway endpoint | NAT data charges | None, it's free |
-| Auto-scaling | Little now | Min 3 tasks for HA already covers peak; matters at growth |
-| Fargate Spot | ~70% on batch work | Interruptible: never API or engine |
-| Non-prod off at night | ~60-70% of non-prod | None |
+| Single NAT gateway | About $90/mo | Outbound connectivity lost if its AZ fails; trading unaffected |
+| S3 gateway endpoint | NAT data processing charges | None (no charge) |
+| Auto-scaling | Minimal at current load | The 3-task HA minimum already covers peak; relevant as traffic grows |
+| Fargate Spot | About 70% on batch workloads | Interruptible; not for the API or matching engine |
+| Scheduled shutdown of non-production | About 60-70% of non-production cost | None |
 
-## How it stays up
+## High Availability and Fault Tolerance
 
-The failures that matter for an exchange, and how the design handles each (described for Option B).
+Failure scenarios and mitigations (Option B).
 
 | Risk | Handling |
 |---|---|
@@ -196,9 +193,9 @@ The failures that matter for an exchange, and how the design handles each (descr
 | Node provider outage | Withdrawals wait in the queue; deposits are credited once it's back (C: second provider) |
 | Withdrawal retried | Idempotent on withdrawal ID; one nonce per withdrawal, so a retry never pays twice |
 
-## Latency budget (p99, order accepted)
+## Latency Budget
 
-Time for an order to be accepted (`202`), step by step, for Option B.
+p99 latency to order acceptance (`202`), Option B.
 
 | Step | ms |
 |---|---|
@@ -208,9 +205,9 @@ Time for an order to be accepted (`202`), step by step, for Option B.
 | Kafka write, 3 AZs | 5-15 |
 | **Total** | **~30** (target 100) |
 
-## Services and alternatives
+## Technology Choices
 
-Each main choice and what it beat.
+Selected services and the alternatives considered.
 
 | Choice | Instead of | Why |
 |---|---|---|
@@ -222,9 +219,9 @@ Each main choice and what it beat.
 | KMS secp256k1 | CloudHSM / MPC provider | Same hardware-backed keys for ~$20 vs ~$2,100/mo; MPC adds insurance but costs thousands |
 | Node provider | Own nodes | ~$200/mo vs ~$300/mo per chain plus syncing and upgrades |
 
-## Scaling plan
+## Scaling Plan
 
-What changes as traffic grows past today's setup.
+Changes required as traffic grows.
 
 | Traffic | Change |
 |---|---|
@@ -232,4 +229,4 @@ What changes as traffic grows past today's setup.
 | ~50k req/s | Shard engines by symbol; in-memory risk check instead of DB write; Aurora; consider EKS |
 | Always | One writer per symbol; multi-region active-active for reads only |
 
-Prices are approximate `ap-southeast-1` list prices, and the traffic numbers are estimates. With real volumes I'd redo the cost tables first. Security is in Problem 5.
+Prices are approximate `ap-southeast-1` on-demand list prices; traffic figures are estimates to be revalidated against real volumes. Security is covered in Problem 5.

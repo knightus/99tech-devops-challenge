@@ -1,4 +1,4 @@
-# Problem 3: Fixing the unreliable API
+# Problem 3: Stabilizing the Docker Compose Platform
 
 "Unreliable and sometimes inaccessible" turned out to be several bugs at once. One broke every request. The others only appeared when something went wrong: a database restart, a slow database, or a redeploy.
 
@@ -13,12 +13,12 @@ docker compose up -d --build
 
 ## Contents
 
-- [What was wrong](#what-was-wrong)
-- [How I found them](#how-i-found-them)
-- [Monitoring I'd add](#monitoring-id-add)
-- [Preventing it in production](#preventing-it-in-production)
+- [Issues Found](#issues-found)
+- [Diagnosis](#diagnosis)
+- [Monitoring and Alerts](#monitoring-and-alerts)
+- [Prevention](#prevention)
 
-## What was wrong
+## Issues Found
 
 | # | Problem | Effect | Fix |
 |---|---|---|---|
@@ -32,7 +32,7 @@ docker compose up -d --build
 
 Smaller fixes: `/` was served as a file download, the health endpoints weren't reachable through nginx (I added `/status` and `/ready`), credentials were hardcoded (moved to `.env`), there was no lockfile, the container ran as root, Postgres had no named volume, and an obsolete `version:` key was present. I deleted `init.sql`: it was never mounted, and if it had been, its limit of 20 connections would fill up with only two API replicas.
 
-## How I found them
+## Diagnosis
 
 I worked through each hop: browser → nginx → API → database.
 
@@ -47,14 +47,14 @@ For the rest, I broke things on purpose and watched what happened:
 
 Each fix is its own commit, so `git log` shows them in the order I found them.
 
-## Monitoring I'd add
+## Monitoring and Alerts
 
 - **nginx 5xx rate** above 1%: would have caught #1, #2 and #5 within minutes.
 - **p99 latency** above 1s: catches #3 while it builds up.
 - **Pool clients waiting** above 0: the only signal for #4. CPU, memory and container status all looked normal while it happened.
 - **`/ready` failing** and **container restart count**: dependency loss and crash loops.
 
-## Preventing it in production
+## Prevention
 
 - Run `verify.sh` in CI. Every bug here shows up when you test failures, not when everything is working.
 - Every network call needs a timeout. Treat a missing timeout as a review blocker.
