@@ -1,5 +1,8 @@
 # Local planning notes
 plans/
 
+# IDE
+.idea/
+
 # Dependencies
 node_modules/
