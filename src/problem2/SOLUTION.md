@@ -1,6 +1,13 @@
-# Problem 2 — NGINX VM at 99% disk
+# Problem 2: NGINX VM at 99% disk
 
 A VM that only runs NGINX shouldn't fill 64 GB. Something is being written and never cleaned up, most likely logs. Find out what before deleting anything.
+
+## Contents
+
+- [Troubleshooting](#troubleshooting)
+- [Likely causes](#likely-causes)
+- [Impact](#impact)
+- [Prevention](#prevention)
 
 ## Troubleshooting
 
