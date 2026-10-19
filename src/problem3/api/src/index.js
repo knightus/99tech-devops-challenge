@@ -46,7 +46,11 @@ app.get("/api/users", async (req, res) => {
     // pool slot per failed query until the pool was exhausted.
     const result = await pool.query("SELECT NOW()");
 
-    await redis.set("last_call", Date.now());
+    // last_call is a best-effort timestamp; a Redis outage must not turn a
+    // successful database read into a 500.
+    redis
+      .set("last_call", Date.now())
+      .catch((err) => console.error("[redis] set last_call failed:", err.message));
     res.json({ ok: true, time: result.rows[0] });
   } catch (err) {
     console.error(err);
