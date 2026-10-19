@@ -4,8 +4,9 @@ plans/
 # IDE
 .idea/
 
-# Dependencies
+# Dependencies and build output
 node_modules/
+dist/
 
 # Local secrets (copy from .env.example)
 .env

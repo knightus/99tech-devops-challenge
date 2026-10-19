@@ -1,0 +1,122 @@
+name: Backend
+
+# API (src/problem3/api) -> Docker image in ECR -> EC2 via SSM Run Command.
+#
+# Repository variables: AWS_ACCOUNT_ID, AWS_REGION, BACKEND_ROLE_ARN,
+#   ECR_REPOSITORY, EC2_INSTANCE_ID, API_URL
+# Environment: production (required reviewers)
+#
+# Rollback: run this workflow manually with an earlier image tag (a git SHA).
+# Nothing is rebuilt; the exact image that ran before is redeployed.
+
+on:
+  push:
+    branches: [master]
+    paths: ['src/problem3/api/**', 'src/problem4/deploy/**', 'src/problem4/.github/**']
+  pull_request:
+    paths: ['src/problem3/api/**', 'src/problem4/deploy/**', 'src/problem4/.github/**']
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Image tag (git SHA) to deploy; use an earlier one to roll back
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # Cancel superseded PR runs, never a run that may be deploying.
+  group: backend-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ci:
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./src/problem4/.github/actions/backend-ci
+
+  build:
+    needs: ci
+    # Skipped (not failed) until an AWS account is configured.
+    if: github.event_name == 'push' && vars.AWS_ACCOUNT_ID != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.BACKEND_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+      # Built once, tagged with the commit. The repository has immutable tags,
+      # so the image tested here is the image that runs in production.
+      - name: Build and push
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
+        run: |
+          docker build -t "$IMAGE" src/problem3/api
+          docker push "$IMAGE"
+
+  deploy:
+    needs: build
+    if: >-
+      always() && vars.AWS_ACCOUNT_ID != '' &&
+      (needs.build.result == 'success' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: production
+      url: ${{ vars.API_URL }}
+    concurrency:
+      group: backend-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TAG: ${{ inputs.image_tag || github.sha }}
+    steps:
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.BACKEND_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # No SSH: SSM runs the script on the instance and records it in CloudTrail.
+      # deploy-backend.sh health-checks and reverts to the previous image itself.
+      - name: Deploy through SSM
+        env:
+          IMAGE: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/${{ vars.ECR_REPOSITORY }}:${{ inputs.image_tag || github.sha }}
+          INSTANCE: ${{ vars.EC2_INSTANCE_ID }}
+        run: |
+          id=$(aws ssm send-command \
+            --instance-ids "$INSTANCE" \
+            --document-name AWS-RunShellScript \
+            --comment "deploy $TAG" \
+            --parameters "commands=[\"/opt/api/deploy-backend.sh $IMAGE\"]" \
+            --query Command.CommandId --output text)
+          status=0
+          aws ssm wait command-executed --command-id "$id" --instance-id "$INSTANCE" || status=$?
+          aws ssm get-command-invocation --command-id "$id" --instance-id "$INSTANCE" \
+            --query '[Status, StandardOutputContent, StandardErrorContent]' --output text
+          exit "$status"
+
+      - name: Verify through the public endpoint
+        env:
+          URL: ${{ vars.API_URL }}
+        run: |
+          for i in $(seq 1 6); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$URL/ready" || true)
+            echo "attempt $i: HTTP $code"
+            [ "$code" = 200 ] && exit 0
+            sleep 10
+          done
+          echo "Public check failed. Roll back by running this workflow with the previous image tag."
+          exit 1

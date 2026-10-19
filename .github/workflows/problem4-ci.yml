@@ -1,0 +1,45 @@
+name: Problem 4 CI
+
+# GitHub only runs workflows from the repository root. The Problem 4
+# deliverables live in src/problem4/.github/workflows, so this workflow runs
+# their AWS-independent parts for real, using the same composite actions, and
+# lints every workflow.
+
+on:
+  pull_request:
+  push:
+    branches: [develop, master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: problem4-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-workflows:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: actionlint
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color \
+            .github/workflows/*.yml src/problem4/.github/workflows/*.yml
+
+  backend-ci:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./src/problem4/.github/actions/backend-ci
+
+  frontend-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./src/problem4/.github/actions/frontend-build
+        with:
+          version: ${{ github.sha }}
