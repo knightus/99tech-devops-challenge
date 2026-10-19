@@ -13,6 +13,7 @@ A Binance-style spot exchange. At 500 req/s the main challenges are correctness 
 ## Contents
 
 - [Architecture Overview](#architecture-overview)
+- [AWS Deployment](#aws-deployment)
 - [Deposit and Withdrawal Flow](#deposit-and-withdrawal-flow)
 - [Deployment Options](#deployment-options)
 - [Options Comparison](#options-comparison)
@@ -43,6 +44,84 @@ flowchart LR
 
 All services run on ECS Fargate with three tasks across three Availability Zones. Each trading pair has a single active matching engine and a warm standby that consumes the same log for failover.
 
+## AWS Deployment
+
+All AWS resources used by Option B. The VPC spans three Availability Zones; only the ALB and NAT gateway are in public subnets.
+
+```mermaid
+flowchart TB
+  Users[Users / API clients] --> R53[Route 53]
+  R53 --> CF[CloudFront<br/>+ AWS WAF + Shield Standard<br/>ACM certificate]
+
+  subgraph Prod["Production account"]
+    subgraph VPC["VPC, 3 AZs"]
+      subgraph Public["Public subnets"]
+        ALB[Application Load Balancer]
+        NAT[NAT gateway]
+      end
+      subgraph App["Private app subnets: ECS Fargate"]
+        API[Order API]
+        WSG[WebSocket gateway]
+        ME[Matching engine]
+        SET[Settlement]
+        MD[Market data]
+        DW[Deposit watcher]
+      end
+      subgraph Data["Private data subnets"]
+        MSK[Amazon MSK<br/>orders, trades topics]
+        RDS[(RDS PostgreSQL<br/>Multi-AZ)]
+        EC[(ElastiCache Redis)]
+      end
+    end
+    S3[(S3: snapshots, archive)]
+    DDB[(DynamoDB: engine lease)]
+    SM[Secrets Manager]
+    ECR[ECR: container images]
+    CW[CloudWatch: logs, metrics, alarms]
+  end
+
+  subgraph Custody["Custody account"]
+    SQS[[SQS FIFO: withdrawals]]
+    SIG[Withdrawal signer<br/>ECS Fargate]
+    KMS[KMS key, secp256k1]
+  end
+
+  CF --> ALB
+  ALB --> API
+  ALB --> WSG
+  API --> RDS
+  API --> MSK
+  MSK --> ME --> MSK
+  MSK --> SET --> RDS
+  MSK --> MD --> EC --> WSG
+  ME --> S3
+  ME --> DDB
+  DW --> RDS
+  API --> SQS --> SIG --> KMS
+  App --> NAT
+  NAT --> NP[Blockchain node provider]
+  SIG --> NP
+```
+
+| AWS service | Used for | Option |
+|---|---|---|
+| Route 53, ACM | DNS and TLS certificates | All |
+| CloudFront, AWS WAF, Shield Standard | Edge TLS, rate limiting, DDoS protection | All |
+| Application Load Balancer | HTTP and WebSocket routing | All |
+| ECS Fargate | All application services | All |
+| Amazon MSK | Order and trade logs | B, C |
+| RDS PostgreSQL Multi-AZ | Balances, orders, trades (and the order log in Option A) | A, B |
+| Aurora PostgreSQL + Global Database | Replaces RDS | C |
+| ElastiCache Redis | Order book snapshots for WebSocket clients | All |
+| DynamoDB | Matching engine leader lease | All |
+| S3 | Engine snapshots, trade archive, backups | All |
+| SQS FIFO (custody account) | Withdrawal queue | All |
+| KMS (custody account) | Withdrawal signing key, secp256k1 | All |
+| Secrets Manager | Database and service credentials | All |
+| ECR | Container images | All |
+| CloudWatch | Logs, metrics, alarms | All |
+| NAT gateway, VPC endpoints | Outbound access, private AWS API access | All |
+
 ## Deposit and Withdrawal Flow
 
 On-chain funds movement is isolated from the trading path. It is not latency-sensitive, but it carries the highest financial risk, so signing runs in a separate AWS account. Security controls are detailed in Problem 5.
@@ -52,7 +131,7 @@ flowchart LR
   CH[Blockchains] --> NP[Node provider]
   NP --> DW[Deposit watcher] -->|credit after N confirmations| DB[(RDS PostgreSQL)]
   API[Order API] -->|withdrawal: debit balance| DB
-  API --> Q[[Withdrawal queue]]
+  API --> Q[[SQS FIFO: withdrawal queue]]
   subgraph Custody account
     Q --> WS[Withdrawal signer] --> KMS[KMS key, secp256k1]
   end
