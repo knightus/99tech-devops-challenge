@@ -12,8 +12,9 @@ A Binance-style spot exchange. 500 req/s is small, so the design spends money on
 
 ## Contents
 
-- [Architecture (Option B)](#architecture-option-b)
+- [How the system works](#how-the-system-works)
 - [Deposits and withdrawals](#deposits-and-withdrawals)
+- [Three ways to build it](#three-ways-to-build-it)
 - [Option A: Lean (launch)](#option-a-lean-launch)
 - [Option B: Balanced (target)](#option-b-balanced-target)
 - [Option C: Resilient (regulated / high stakes)](#option-c-resilient-regulated--high-stakes)
@@ -25,29 +26,29 @@ A Binance-style spot exchange. 500 req/s is small, so the design spends money on
 - [Services and alternatives](#services-and-alternatives)
 - [Scaling plan](#scaling-plan)
 
-## Architecture (Option B)
+## How the system works
 
-Orders go through a durable log. The API reserves the balance and writes the order to Kafka; one matching engine per symbol reads it, and settlement and market data run off the engine's output.
+When a user places an order, the API first sets aside the money in the database so it can't be spent twice. It then writes the order to an **order log**, a durable, ordered list of every order. A matching engine reads the log, matches buyers with sellers, and writes the resulting trades back out. Settlement updates balances from those trades, and the market data service pushes the live order book to users over WebSocket.
 
 ```mermaid
 flowchart LR
   U[Users / bots] --> CF[CloudFront + WAF] --> ALB
   ALB --> API[Order API]
   ALB --> WS[WebSocket gateway]
-  API -->|reserve balance| DB[(RDS PostgreSQL)]
-  API -->|order| IN[[Kafka: orders]]
+  API -->|set money aside| DB[(PostgreSQL)]
+  API -->|order| IN[[Order log]]
   IN --> ME[Matching engine<br/>active + standby]
-  ME --> OUT[[Kafka: fills, book updates]]
+  ME --> OUT[[Trades log]]
   OUT --> SET[Settlement] --> DB
   OUT --> MD[Market data] --> R[(Redis)] --> WS
-  ME -.snapshot + offset.-> S3[(S3)]
+  ME -.snapshot.-> S3[(S3)]
 ```
 
-All services run on ECS Fargate, 3 tasks across 3 AZs.
+Every service runs on ECS Fargate with 3 copies across 3 AZs. There is one matching engine per trading pair, with a standby that reads the same log so it can take over if the active one fails.
 
 ## Deposits and withdrawals
 
-Money moving on and off the exchange. This path is not latency-sensitive (minutes are fine), but it is where an exchange can lose funds, so it is kept apart from trading. Problem 5 covers how it is secured.
+This is how money moves on and off the exchange. It is not latency-sensitive (minutes are fine), but it is where an exchange can lose funds, so it is kept apart from trading. Problem 5 covers how it is secured.
 
 ```mermaid
 flowchart LR
@@ -70,9 +71,13 @@ flowchart LR
 | KMS secp256k1 key | Signing key for the hot wallet | Key stays in AWS's FIPS 140-2 L3 hardware; ~$20/mo vs ~$2,100/mo for 2 CloudHSM units |
 | Hot / cold split | Only a small share of funds is online | A full compromise can only reach the hot wallet |
 
+## Three ways to build it
+
+The services above stay the same. What changes is how the order log is stored, how fast the database fails over, and whether there is a backup region. More resilience costs more, so I priced three versions.
+
 ## Option A: Lean (launch)
 
-Same services, but the order log is an ordered Postgres table instead of Kafka. Cheapest way to launch.
+The order log is a table in PostgreSQL. No extra systems to run, so it's the cheapest way to launch.
 
 | Component | Choice | ~$/mo |
 |---|---|---|
@@ -92,7 +97,7 @@ Same services, but the order log is an ordered Postgres table instead of Kafka. 
 
 ## Option B: Balanced (target)
 
-The diagram above. Kafka (MSK) carries orders and events, so the engine fails over in seconds and the system can grow.
+The order log moves to Kafka (Amazon MSK), which is built for this job. The standby engine takes over in seconds, and the system can grow about 100x.
 
 | Component | Choice | ~$/mo |
 |---|---|---|
@@ -151,7 +156,7 @@ xychart-beta
 | Engine failover | minutes | seconds | seconds |
 | Grows to | ~10x | ~100x | ~100x |
 
-**Recommendation:** launch on A → move to B before ~10x traffic → C only when a region outage costs more than ~$1.5k/mo. A→B is small: the engine reads Kafka instead of a table.
+**Recommendation:** launch on A. Move to B before traffic grows about 10x; the change is small, because the engine just reads Kafka instead of a table. Move to C only when a region outage would cost more than about $1.5k/month.
 
 ## Shared cost: data out
 
@@ -177,7 +182,7 @@ Ways to cut the bill in any option, and what each one costs you.
 
 ## How it stays up
 
-The failures that matter for an exchange, and how the design handles each.
+The failures that matter for an exchange, and how the design handles each (described for Option B).
 
 | Risk | Handling |
 |---|---|
@@ -193,7 +198,7 @@ The failures that matter for an exchange, and how the design handles each.
 
 ## Latency budget (p99, order accepted)
 
-Time for an order to be accepted (`202`), step by step.
+Time for an order to be accepted (`202`), step by step, for Option B.
 
 | Step | ms |
 |---|---|
