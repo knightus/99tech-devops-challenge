@@ -4,8 +4,8 @@ A Binance-style spot exchange. 500 req/s is small, so the design spends money on
 
 | | |
 |---|---|
-| Scope | Spot trading: place/cancel orders, matching, live order book + trades (WebSocket), balances |
-| Out of scope | Futures, margin, KYC, fiat, on-chain deposits |
+| Scope | Spot trading: place/cancel orders, matching, live order book + trades (WebSocket), balances, on-chain deposits and withdrawals |
+| Out of scope | Futures, margin, KYC, fiat |
 | Traffic | 500 req/s peak, ~150 average, ~10k WebSocket clients |
 | Targets | p99 < 100 ms to accept an order · no lost or duplicate orders · survive losing an AZ |
 | Region | `ap-southeast-1`, 3 AZs |
@@ -13,6 +13,7 @@ A Binance-style spot exchange. 500 req/s is small, so the design spends money on
 ## Contents
 
 - [Architecture (Option B)](#architecture-option-b)
+- [Deposits and withdrawals](#deposits-and-withdrawals)
 - [Option A: Lean (launch)](#option-a-lean-launch)
 - [Option B: Balanced (target)](#option-b-balanced-target)
 - [Option C: Resilient (regulated / high stakes)](#option-c-resilient-regulated--high-stakes)
@@ -44,6 +45,31 @@ flowchart LR
 
 All services run on ECS Fargate, 3 tasks across 3 AZs.
 
+## Deposits and withdrawals
+
+Money moving on and off the exchange. This path is not latency-sensitive (minutes are fine), but it is where an exchange can lose funds, so it is kept apart from trading. Problem 5 covers how it is secured.
+
+```mermaid
+flowchart LR
+  CH[Blockchains] --> NP[Node provider]
+  NP --> DW[Deposit watcher] -->|credit after N confirmations| DB[(RDS PostgreSQL)]
+  API[Order API] -->|withdrawal: debit balance| DB
+  API --> Q[[Withdrawal queue]]
+  subgraph Custody account
+    Q --> WS[Withdrawal signer] --> KMS[KMS key, secp256k1]
+  end
+  WS -->|broadcast| NP --> CH
+```
+
+| Part | What it does | Why this way |
+|---|---|---|
+| Node provider | Reads and sends blockchain transactions | Running our own nodes is ~$300/mo per chain plus ops; a provider is cheaper at this size |
+| Deposit watcher | Credits a deposit after N confirmations | Keyed on transaction hash, so a deposit can never be credited twice |
+| Withdrawal queue | Holds approved withdrawals until signed | Durable: a signer outage delays withdrawals, never loses them |
+| Withdrawal signer | Signs and broadcasts in a separate AWS account | Production can only add to the queue, never sign |
+| KMS secp256k1 key | Signing key for the hot wallet | Key stays in AWS's FIPS 140-2 L3 hardware; ~$20/mo vs ~$2,100/mo for 2 CloudHSM units |
+| Hot / cold split | Only a small share of funds is online | A full compromise can only reach the hot wallet |
+
 ## Option A: Lean (launch)
 
 Same services, but the order log is an ordered Postgres table instead of Kafka. Cheapest way to launch.
@@ -56,7 +82,8 @@ Same services, but the order log is an ordered Postgres table instead of Kafka. 
 | Cache | Redis t4g.medium ×2 | 95 |
 | Edge | WAF + ALB | 280 |
 | Network / logs | 1 NAT, CloudWatch | 125 |
-| **Total** | on-demand / 1-yr commitments | **1,090 / 900** |
+| Wallet | Deposit + withdrawal services, node provider, KMS | 260 |
+| **Total** | on-demand / 1-yr commitments | **1,350 / 1,160** |
 
 | Pros | Cons |
 |---|---|
@@ -75,7 +102,8 @@ The diagram above. Kafka (MSK) carries orders and events, so the engine fails ov
 | Cache | Redis t4g.medium ×2 | 95 |
 | Edge | WAF + ALB | 280 |
 | Network / logs | 1 NAT, CloudWatch | 125 |
-| **Total** | on-demand / 1-yr commitments | **1,550 / 1,360** |
+| Wallet | Deposit + withdrawal services, node provider, KMS | 260 |
+| **Total** | on-demand / 1-yr commitments | **1,810 / 1,620** |
 
 | Pros | Cons |
 |---|---|
@@ -95,7 +123,8 @@ Option B plus faster database failover (Aurora) and a standby copy in a second r
 | Edge | WAF + ALB | 280 |
 | Network / logs | 3 NAT, CloudWatch | 255 |
 | Second region | Pilot light (replicas only, no compute) | 455 |
-| **Total** | on-demand / 1-yr commitments | **2,950 / 2,500** |
+| Wallet | Same as B + a second node provider for failover | 460 |
+| **Total** | on-demand / 1-yr commitments | **3,410 / 2,960** |
 
 | Pros | Cons |
 |---|---|
@@ -110,8 +139,8 @@ What each option costs, and what it buys you when things fail.
 xychart-beta
   title "Monthly cost, $ (1-yr commitments)"
   x-axis ["A Lean", "B Balanced", "C Resilient"]
-  y-axis "USD" 0 --> 3000
-  bar [900, 1360, 2500]
+  y-axis "USD" 0 --> 3500
+  bar [1160, 1620, 2960]
 ```
 
 | | A | B | C |
@@ -159,6 +188,8 @@ The failures that matter for an exchange, and how the design handles each.
 | Retries / duplicates | Client order ID; settlement keyed on trade ID |
 | DB failover | API switches to cancel-only for 1-2 min |
 | Traffic spike | Kafka buffers; scale on consumer lag, not CPU |
+| Node provider outage | Withdrawals wait in the queue; deposits are credited once it's back (C: second provider) |
+| Withdrawal retried | Idempotent on withdrawal ID; one nonce per withdrawal, so a retry never pays twice |
 
 ## Latency budget (p99, order accepted)
 
@@ -183,6 +214,8 @@ Each main choice and what it beat.
 | RDS PostgreSQL | DynamoDB / Aurora | Ledger needs ACID; Aurora's faster failover costs ~30% more (Option C) |
 | ALB WebSocket | API Gateway WebSocket | API Gateway bills per message; market data is thousands/s |
 | WAF per API key | Per IP only | Abuse is one bot with valid keys spamming orders |
+| KMS secp256k1 | CloudHSM / MPC provider | Same hardware-backed keys for ~$20 vs ~$2,100/mo; MPC adds insurance but costs thousands |
+| Node provider | Own nodes | ~$200/mo vs ~$300/mo per chain plus syncing and upgrades |
 
 ## Scaling plan
 
