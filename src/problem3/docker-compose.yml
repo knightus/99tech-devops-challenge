@@ -2,7 +2,7 @@ services:
   nginx:
     image: nginx:1.25
     ports:
-      - "8080:80"
+      - "${NGINX_PORT:-8080}:80"
     volumes:
       - ./nginx/conf.d:/etc/nginx/conf.d
     depends_on:
