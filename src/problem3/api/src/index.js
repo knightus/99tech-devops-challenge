@@ -10,6 +10,10 @@ const pool = new Pool({
   password: "postgres",
   database: "postgres",
   port: 5432,
+  // pg's defaults wait forever. Fail fast instead so a stalled database
+  // produces a quick 500 rather than requests piling up indefinitely.
+  connectionTimeoutMillis: 3000,
+  query_timeout: 5000,
 });
 
 // Postgres can drop idle pooled connections (restart, failover, network blip).
@@ -19,7 +23,15 @@ pool.on("error", (err) => {
   console.error("[pg] idle client error:", err.message);
 });
 
-const redis = new Redis({ host: process.env.REDIS_HOST, port: 6379 });
+const redis = new Redis({
+  host: process.env.REDIS_HOST,
+  port: 6379,
+  connectTimeout: 2000,
+  // By default ioredis queues commands while disconnected, so requests hang
+  // during a Redis outage. Error immediately instead.
+  enableOfflineQueue: false,
+  maxRetriesPerRequest: 1,
+});
 
 // Same rule for ioredis: an unlistened 'error' event must never be able to
 // take the process down.
