@@ -58,8 +58,22 @@ app.get("/api/users", async (req, res) => {
   }
 });
 
+// Liveness: the process is up. Deliberately checks no dependencies, so a
+// database blip never gets a healthy API container restarted.
 app.get("/status", (req, res) => {
   res.json({ status: "ok" });
+});
+
+// Readiness: this instance can serve real traffic right now. A load balancer
+// should stop routing here (not restart it) while this returns 503.
+app.get("/ready", async (req, res) => {
+  const checks = {};
+  await Promise.all([
+    pool.query("SELECT 1").then(() => (checks.postgres = "ok"), (e) => (checks.postgres = e.message)),
+    redis.ping().then(() => (checks.redis = "ok"), (e) => (checks.redis = e.message)),
+  ]);
+  const ready = checks.postgres === "ok" && checks.redis === "ok";
+  res.status(ready ? 200 : 503).json({ ready, checks });
 });
 
 app.listen(3000, () => console.log("API running on 3000"));
