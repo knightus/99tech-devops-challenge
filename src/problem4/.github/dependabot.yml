@@ -1,0 +1,13 @@
+version: 2
+
+# Actions are pinned to commit SHAs; Dependabot keeps those pins current.
+updates:
+  - package-ecosystem: github-actions
+    directories: ["/", "/src/problem4/.github/actions/*"]
+    schedule: { interval: weekly }
+  - package-ecosystem: npm
+    directories: ["/src/problem3/api", "/src/problem4/frontend"]
+    schedule: { interval: weekly }
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]

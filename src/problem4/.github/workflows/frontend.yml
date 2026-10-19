@@ -1,0 +1,116 @@
+name: Frontend
+
+# SPA (src/problem4/frontend) -> S3 -> CloudFront.
+#
+# Repository variables: AWS_ACCOUNT_ID, AWS_REGION, FRONTEND_ROLE_ARN,
+#   S3_BUCKET, CLOUDFRONT_DISTRIBUTION_ID, SITE_URL
+# Environment: production (required reviewers)
+#
+# Every release is archived under s3://<bucket>/releases/<sha>/ and published to
+# live/ (the CloudFront origin path). Rollback: run this workflow manually with
+# an earlier release SHA; it republishes that archive without rebuilding.
+
+on:
+  push:
+    branches: [master]
+    paths: ['src/problem4/frontend/**', 'src/problem4/.github/**']
+  pull_request:
+    paths: ['src/problem4/frontend/**', 'src/problem4/.github/**']
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Release (git SHA) to publish; use an earlier one to roll back
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frontend-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./src/problem4/.github/actions/frontend-build
+        with:
+          version: ${{ github.sha }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: frontend-${{ github.sha }}
+          path: src/problem4/frontend/dist
+          if-no-files-found: error
+          retention-days: 14
+
+  deploy:
+    needs: build
+    if: >-
+      always() && vars.AWS_ACCOUNT_ID != '' &&
+      ((needs.build.result == 'success' && github.event_name == 'push') ||
+       github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: ${{ vars.SITE_URL }}
+    concurrency:
+      group: frontend-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RELEASE: ${{ inputs.release || github.sha }}
+      BUCKET: ${{ vars.S3_BUCKET }}
+      DIST_ID: ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}
+    steps:
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.FRONTEND_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Download build
+        if: github.event_name == 'push'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: frontend-${{ github.sha }}
+          path: build
+
+      - name: Archive release
+        if: github.event_name == 'push'
+        run: aws s3 sync build "s3://$BUCKET/releases/$RELEASE/" --no-progress
+
+      # Hashed assets first, index.html last, so no visitor gets an index.html
+      # that points at assets not uploaded yet. No --delete: someone who loaded
+      # the previous index.html seconds ago still needs its assets. An S3
+      # lifecycle rule expires old objects under live/ after 30 days.
+      - name: Publish
+        run: |
+          src="s3://$BUCKET/releases/$RELEASE"
+          aws s3 ls "$src/index.html" >/dev/null || { echo "Release $RELEASE not found"; exit 1; }
+          aws s3 sync "$src" "s3://$BUCKET/live" \
+            --exclude index.html --exclude version.json \
+            --cache-control "public,max-age=31536000,immutable" --no-progress
+          for f in version.json index.html; do
+            aws s3 cp "$src/$f" "s3://$BUCKET/live/$f" \
+              --cache-control "no-cache" --no-progress
+          done
+
+      - name: Invalidate CloudFront
+        run: |
+          id=$(aws cloudfront create-invalidation --distribution-id "$DIST_ID" \
+            --paths /index.html /version.json --query Invalidation.Id --output text)
+          aws cloudfront wait invalidation-completed --distribution-id "$DIST_ID" --id "$id"
+
+      - name: Verify the live version
+        env:
+          URL: ${{ vars.SITE_URL }}
+        run: |
+          live=$(curl -fsS --max-time 10 "$URL/version.json" | jq -r .version)
+          echo "live: $live, expected: $RELEASE"
+          [ "$live" = "$RELEASE" ]

@@ -1,0 +1,46 @@
+name: Backend CI
+description: Install, check and integration-test the API (src/problem3) against its full stack.
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: '20'
+        cache: npm
+        cache-dependency-path: src/problem3/api/package-lock.json
+
+    - name: Install and check
+      shell: bash
+      working-directory: src/problem3/api
+      run: |
+        npm ci
+        node --check src/index.js
+        npm audit --omit=dev --audit-level=high
+
+    # Integration test: start nginx, API, Postgres and Redis, then inject the
+    # failures from Problem 3 (database restart and stall, pool exhaustion,
+    # Redis outage, crash, container recreate) and check the stack recovers.
+    - name: Start the stack
+      shell: bash
+      working-directory: src/problem3
+      run: |
+        cp .env.example .env
+        docker compose up -d --build --wait
+
+    - name: Failure-injection tests
+      shell: bash
+      working-directory: src/problem3
+      run: ./verify.sh
+
+    - name: Logs on failure
+      if: failure()
+      shell: bash
+      working-directory: src/problem3
+      run: docker compose logs --tail 100
+
+    - name: Stop the stack
+      if: always()
+      shell: bash
+      working-directory: src/problem3
+      run: docker compose down -v
