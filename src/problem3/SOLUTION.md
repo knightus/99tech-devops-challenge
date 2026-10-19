@@ -1,4 +1,4 @@
-# Problem 3 — Fixing the unreliable API
+# Problem 3: Fixing the unreliable API
 
 "Unreliable and sometimes inaccessible" turned out to be several bugs at once. One broke every request. The others only appeared when something went wrong: a database restart, a slow database, or a redeploy.
 
@@ -11,13 +11,20 @@ docker compose up -d --build
 ./verify.sh        # breaks things on purpose and checks the stack recovers: 14/14 pass
 ```
 
+## Contents
+
+- [What was wrong](#what-was-wrong)
+- [How I found them](#how-i-found-them)
+- [Monitoring I'd add](#monitoring-id-add)
+- [Preventing it in production](#preventing-it-in-production)
+
 ## What was wrong
 
 | # | Problem | Effect | Fix |
 |---|---|---|---|
 | 1 | nginx sent traffic to port 3001; the API listens on 3000 | Every `/api` request returned 502 | Correct the port |
 | 2 | No handler for the Postgres pool's `error` event | A database restart crashed the API, and it stayed down | Add `pool.on('error')`, plus `restart: unless-stopped` |
-| 3 | No timeouts anywhere (pg, Redis, nginx) | A slow database made requests hang until nothing could be served | Timeouts of 3–5s in the app and 10s in nginx |
+| 3 | No timeouts anywhere (pg, Redis, nginx) | A slow database made requests hang until nothing could be served | Timeouts of 3-5s in the app and 10s in nginx |
 | 4 | `release()` skipped when a query failed | Each failure leaked a pool slot until the API was dead | Use `pool.query()` |
 | 5 | nginx looked up the `api` hostname only once, at startup | After a redeploy, nginx kept sending traffic to the old container's IP and returned 502 | `resolver` + hostname in a variable |
 | 6 | `depends_on` didn't wait for Postgres to be ready | Requests failed right after startup | Healthchecks + `service_healthy` |
