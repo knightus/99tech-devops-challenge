@@ -30,45 +30,9 @@ The assets an attacker would target, ranked by impact.
 
 The Option A layout with security changes marked. The same controls apply to Options B and C; differences are noted in the change table.
 
-```mermaid
-flowchart TB
-  Users[Users / API clients] --> CF[CloudFront + WAF<br/>per-key rate limits]
-  subgraph Prod["Production account"]
-    DNSFW[Route 53 DNS Firewall<br/>domain allowlist]
-    ALB[Application Load Balancer]
-    API[Order API<br/>scoped API keys]
-    APP[Engine, settlement,<br/>market data, deposit watcher]
-    DB[(PostgreSQL<br/>per-service roles)]
-    S3[(S3 snapshots<br/>Object Lock + checksum)]
-    GD[GuardDuty + Security Hub]
-  end
-  subgraph Custody["Custody account"]
-    SQS[[SQS FIFO: withdrawal requests]]
-    POL[Withdrawal policy engine<br/>limits, allowlist, 2-person approval]
-    SIG[Withdrawal signer]
-    KMS[KMS secp256k1<br/>signer-only key policy]
-    NFW[Network Firewall<br/>node provider only]
-    REC[Reconciliation job<br/>auto-halt]
-  end
-  subgraph Security["Security account"]
-    LOGS[(CloudTrail + logs<br/>S3 Object Lock)]
-  end
-  CF --> ALB --> API --> DB
-  APP --> DB
-  APP --> S3
-  API -->|send only| SQS --> POL --> SIG --> KMS
-  SIG --> NFW --> NP[Node provider]
-  REC --> NP
-  REC --> POL
-  Prod -.write-only.-> LOGS
-  Custody -.write-only.-> LOGS
-  APP -->|DNS lookups| DNSFW
+![Secured architecture with added and changed controls marked](images/secured-architecture.svg)
 
-  classDef added fill:#bbf7d0,stroke:#15803d
-  classDef changed fill:#fde68a,stroke:#b45309
-  class DNSFW,POL,NFW,REC,LOGS,GD added
-  class CF,API,DB,S3,KMS changed
-```
+Editable source: [`secured-architecture.drawio`](images/secured-architecture.drawio).
 
 Legend: green = added, amber = changed.
 

@@ -34,16 +34,7 @@ The criteria used to define "production ready", and how each is met.
 
 `.github/workflows/backend.yml`. Pull requests run CI only; merges to `master` build and deploy.
 
-```mermaid
-flowchart LR
-  PR[Pull request / push] --> CI[CI: npm ci, syntax check,<br/>npm audit, failure-injection tests]
-  CI -->|master only| B[Build image<br/>tag = git SHA] --> ECR[(ECR)]
-  ECR --> G{Approval:<br/>production}
-  G --> D[SSM Run Command:<br/>deploy-backend.sh]
-  D --> H{Healthy?}
-  H -->|yes| V[Public /ready check]
-  H -->|no| RV[Revert to previous image,<br/>fail the job]
-```
+![Backend pipeline](images/backend-pipeline.svg)
 
 | Stage | Detail |
 |---|---|
@@ -56,15 +47,7 @@ flowchart LR
 
 `.github/workflows/frontend.yml`. The build is archived per release so any version can be republished.
 
-```mermaid
-flowchart LR
-  PR[Pull request / push] --> B[npm ci, npm audit,<br/>vite build, version.json]
-  B -->|master only| G{Approval:<br/>production}
-  G --> A[Archive to<br/>releases/SHA/]
-  A --> P[Publish to live/:<br/>assets first, index.html last]
-  P --> I[CloudFront invalidation:<br/>index.html, version.json]
-  I --> V[Verify live version.json = SHA]
-```
+![Frontend pipeline](images/frontend-pipeline.svg)
 
 | Step | Detail |
 |---|---|
