@@ -10,3 +10,6 @@ dist/
 
 # Local secrets (copy from .env.example)
 .env
+
+# Python cache
+__pycache__/
